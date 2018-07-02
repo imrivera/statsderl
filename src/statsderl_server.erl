@@ -7,7 +7,8 @@
 ]).
 
 -record(state, {
-    headers :: tuple(),
+    base_key :: iodata(),
+    addresses :: {{inet:ip_address(), inet:port_number()}},
     socket :: inet:socket()
 }).
 
@@ -17,15 +18,14 @@
 init(Parent, Name) ->
     BaseKey = ?ENV(?ENV_BASEKEY, ?DEFAULT_BASEKEY),
     Hostname = ?ENV(?ENV_HOSTNAME, ?DEFAULT_HOSTNAME),
-    {ok, Headers} = case is_list(Hostname)
-                    andalso Hostname /= []
-                    andalso is_tuple(hd(Hostname)) of
-                        true ->
-                            generate_udp_headers(Hostname, BaseKey, []);
-                        false ->
-                            Port = ?ENV(?ENV_PORT, ?DEFAULT_PORT),
-                            generate_udp_headers([{Hostname, Port}],
-                                BaseKey, [])
+    {ok, Addresses} = case is_list(Hostname)
+                          andalso Hostname /= []
+                          andalso is_tuple(hd(Hostname)) of
+                              true ->
+                                  generate_addresses(Hostname, []);
+                              false ->
+                                  Port = ?ENV(?ENV_PORT, ?DEFAULT_PORT),
+                                  generate_addresses([{Hostname, Port}], [])
                     end,
 
     case gen_udp:open(0, [{active, false}]) of
@@ -35,7 +35,8 @@ init(Parent, Name) ->
 
             loop(#state {
                 socket = Socket,
-                headers = list_to_tuple(Headers)
+                base_key = statsderl_utils:base_key(BaseKey),
+                addresses = list_to_tuple(Addresses)
             });
         {error, Reason} ->
             exit(Reason)
@@ -48,12 +49,13 @@ start_link(Name) ->
 
 %% private
 handle_msg({cast, KeyHash, Packet}, #state {
-        headers = Headers,
+        addresses = Addresses,
+        base_key = BaseKey,
         socket = Socket
     } = State) ->
 
-    Header = element((KeyHash rem tuple_size(Headers)) + 1, Headers),
-    statsderl_udp:send(Socket, Header, Packet),
+    {Ip, Port} = element((KeyHash rem tuple_size(Addresses)) + 1, Addresses),
+    gen_udp:send(Socket, Ip, Port, [BaseKey, Packet]),
     {ok, State};
 handle_msg({inet_reply, _Socket, ok}, State) ->
     {ok, State};
@@ -67,22 +69,12 @@ loop(State) ->
         loop(State2)
     end.
 
-generate_udp_headers([], _BaseKey, Acc) ->
+generate_addresses([], Acc) ->
     {ok, lists:reverse(Acc)};
-generate_udp_headers([{Hostname, Port} | Rest], BaseKey, Acc) ->
-    case udp_header(Hostname, Port, BaseKey) of
-        {ok, Header} ->
-            generate_udp_headers(Rest, BaseKey, [Header | Acc]);
+generate_addresses([{Hostname, Port} | Rest], Acc) ->
+    case statsderl_utils:getaddrs(Hostname) of
+        {ok, Ip} ->
+            generate_addresses(Rest, [{Ip, Port} | Acc]);
         Error ->
             Error
-    end.
-
-udp_header(Hostname, Port, BaseKey) ->
-    case statsderl_utils:getaddrs(Hostname) of
-        {ok, {A, B, C, D}} ->
-            Header = statsderl_udp:header({A, B, C, D}, Port),
-            BaseKey2 = statsderl_utils:base_key(BaseKey),
-            {ok, [Header, BaseKey2]};
-        {error, Reason} ->
-            {error, Reason}
     end.
